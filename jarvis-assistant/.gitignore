@@ -1,0 +1,59 @@
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyd
+
+# Environments & secrets — NEVER commit
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+
+# IDE settings
+.vscode/
+.idea/
+
+# Logs
+logs/*.log
+logs/*.txt
+
+# Model & binary files (large, non-source)
+models/*.bin
+models/*.safetensors
+models/*.pth
+models/*.onnx
+models/*.pt
+
+# Face recognition training data (personal biometric data)
+auth/known_faces/
+auth/trained_model.yml
+auth/trainer.yml
+
+# Porcupine wake-word model files
+assets/*.ppn
+assets/*.pv
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Audio files
+*.wav
+*.mp3
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Distribution / build
+dist/
+build/
+*.egg-info/
+
+# Static assets temp
+assets/*.tmp
