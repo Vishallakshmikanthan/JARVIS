@@ -123,97 +123,58 @@ class BaseAgent:
 
 # ---------------------------------------------------------------------------
 # Planner Agent  (JARVIS persona)
+# Delegates to core.planner.plan_task for validated, structured step generation.
 # ---------------------------------------------------------------------------
-
-_PLANNER_SYSTEM_PROMPT = """You are JARVIS, the Planner Agent of a multi-agent AI system.
-
-Your sole responsibility: decompose the user's request into an ordered, minimal list of concrete steps.
-
-Rules:
-- Output ONLY valid JSON — no prose, no markdown fences.
-- Each step must have: "index" (int, 1-based), "description" (str), "intent" (str), "query" (str).
-- Valid intents: weather, news, search, wiki, music, system, joke, automation, file, context, reasoning.
-- Use "reasoning" for steps that require LLM synthesis (summarising, explaining, composing).
-- "query" is the exact sub-query the Executor Agent will receive — be precise and self-contained.
-- Merge trivially sequential steps. Aim for 1–5 steps maximum.
-- If the request requires only one step, output a list with one element.
-
-Output format (strict):
-[
-  {"index": 1, "description": "...", "intent": "...", "query": "..."},
-  {"index": 2, "description": "...", "intent": "...", "query": "..."}
-]"""
-
 
 class PlannerAgent(BaseAgent):
     """
-    Breaks the user request into an ordered list of Steps.
+    Breaks the user request into an ordered list of Steps using core.planner.
     Persona: JARVIS — precise, formal, minimal.
     """
 
     _AGENT_NAME = "Planner"
 
     def __init__(self, model: str = config.OLLAMA_MODEL) -> None:
+        # System prompt not used directly — plan_task manages its own prompt.
+        # BaseAgent is still initialised for potential future direct _call use.
         super().__init__(
-            system_prompt=_PLANNER_SYSTEM_PROMPT,
+            system_prompt="",
             model=model,
-            temperature=0.2,   # low temp for deterministic, structured output
+            temperature=0.2,
             max_tokens=512,
         )
 
     def plan(self, user_input: str) -> list[Step]:
         """
-        Decompose *user_input* into an ordered list of Steps.
+        Decompose *user_input* into an ordered, validated list of Steps.
+        Delegates to core.planner.plan_task which handles LLM call, JSON parsing,
+        and intent validation against EXECUTABLE_INTENTS.
 
         Args:
             user_input: The raw user request.
 
         Returns:
-            List of Step objects. Returns a single fallback reasoning step on failure.
+            List of Step objects (converted from PlanStep). Always non-empty.
         """
+        from core.planner import plan_task, PlanStep
         logger.info(f"[agents:Planner] planning input={user_input!r}")
-        raw = self._call(user_input)
 
-        steps = self._parse_steps(raw)
-        if not steps:
-            logger.warning("[agents:Planner] parse failed — using single-step fallback")
-            steps = [Step(index=1, description="Process request", intent="reasoning", query=user_input)]
+        plan_steps = plan_task(user_input, model=self.model)
 
-        logger.info(f"[agents:Planner] produced {len(steps)} step(s)")
+        # Convert PlanStep → Step (agents pipeline uses Step dataclass)
+        steps = [
+            Step(
+                index=ps.index,
+                description=ps.description,
+                intent=ps.intent,
+                query=ps.query,
+            )
+            for ps in plan_steps
+        ]
+
+        logger.info(f"[agents:Planner] produced {len(steps)} validated step(s)")
         for step in steps:
             logger.debug(f"[agents:Planner] {step}")
-        return steps
-
-    def _parse_steps(self, raw: str) -> list[Step]:
-        """Extract and validate Step objects from raw LLM JSON output."""
-        # strip markdown code fences if present
-        cleaned = re.sub(r"```(?:json)?|```", "", raw).strip()
-
-        # find the first JSON array in the response
-        match = re.search(r"\[.*\]", cleaned, re.DOTALL)
-        if not match:
-            logger.warning(f"[agents:Planner] no JSON array found in: {raw[:120]!r}")
-            return []
-
-        try:
-            data: list[dict] = json.loads(match.group())
-        except json.JSONDecodeError as exc:
-            logger.error(f"[agents:Planner] JSON decode error: {exc}")
-            return []
-
-        steps: list[Step] = []
-        for item in data:
-            try:
-                steps.append(Step(
-                    index=int(item["index"]),
-                    description=str(item["description"]),
-                    intent=str(item.get("intent", "reasoning")).lower(),
-                    query=str(item["query"]),
-                ))
-            except (KeyError, ValueError) as exc:
-                logger.warning(f"[agents:Planner] skipping malformed step {item}: {exc}")
-                continue
-
         return steps
 
 
