@@ -182,12 +182,14 @@ def _process(user_text: str, ctx: dict, agent_mode: bool = False) -> str:
 
     if agent_mode:
         from loguru import logger
-        result = ctx["orchestrator"].run(user_text)
-        logger.info(
-            f"[main:_process] agent pipeline steps={len(result.steps)} "
-            f"critic_passed={result.critic_passed}"
-        )
-        response = result.final_response
+        from core.planner import plan_task
+        from core.executor import execute_plan
+        steps = plan_task(user_text)
+        logger.info(f"[main:_process] planner produced {len(steps)} step(s)")
+        for s in steps:
+            _print("PLAN", str(s), _C.DIM)
+        response = execute_plan(steps)
+        logger.info(f"[main:_process] executor complete response_len={len(response)}")
     else:
         route = ctx["router"].route(user_text)
         _print("ROUTE", str(route), _C.DIM)
