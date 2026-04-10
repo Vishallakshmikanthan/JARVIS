@@ -184,6 +184,16 @@ def _process(user_text: str, ctx: dict, agent_mode: bool = False) -> str:
     """
     from core.memory import log_interaction
     from core.autonomous import detect_autonomous_command
+    from core.skill_generator import detect_skill_creation_command, create_skill
+
+    # --- Skill generator (intercept before normal routing) ---
+    skill_purpose = detect_skill_creation_command(user_text)
+    if skill_purpose is not None:
+        _print("SKILL-GEN", f"Generating skill for: '{skill_purpose}'", _C.MAGENTA)
+        response = create_skill(skill_purpose)
+        log_interaction("user",      user_text, persona=ctx["persona_manager"].name)
+        log_interaction("assistant", response,  persona=ctx["persona_manager"].name)
+        return response
 
     # --- Autonomous mode control (intercept before normal routing) ---
     auto_cmd = detect_autonomous_command(user_text)
