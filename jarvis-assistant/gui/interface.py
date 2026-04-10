@@ -1,17 +1,26 @@
 import tkinter as tk
-from tkinter import scrolledtext
+from tkinter import scrolledtext, ttk
 import threading
 import time
 import math
+import psutil
 
 class JarvisGUI:
     def __init__(self, root, submit_callback=None):
         self.root = root
-        self.root.title("JARVIS Assistant Interface")
-        self.root.geometry("800x600")
-        self.root.configure(bg="#1e1e1e")
+        self.root.title("IronMan AI HUD")
+        self.root.geometry("1000x700")
+        self.root.configure(bg="#000b18")
         
         self.submit_callback = submit_callback
+        
+        # UI Colours
+        self.c_bg = "#000b18"
+        self.c_panel = "#001830"
+        self.c_neon = "#00ffff"
+        self.c_warn = "#ff3300"
+        self.c_text = "#d4d4d4"
+        self.c_dim = "#004488"
         
         self.setup_ui()
         
@@ -19,57 +28,120 @@ class JarvisGUI:
         self.orb_radius = 60
         self.orb_angle = 0.0
         self.is_processing = False
+        
+        # State variables
+        self.active_skills = []
+        self.current_agent = "Standby"
+        
         self.animate_orb()
+        self.update_system_stats()
         
     def setup_ui(self):
+        # Configure grid for main layout
+        self.root.grid_rowconfigure(1, weight=1)
+        self.root.grid_columnconfigure(1, weight=1)
+        
         # Top frame: Persona indicator
-        top_frame = tk.Frame(self.root, bg="#1e1e1e")
-        top_frame.pack(side=tk.TOP, fill=tk.X, pady=10)
+        top_frame = tk.Frame(self.root, bg=self.c_bg)
+        top_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(10, 0), padx=20)
         
         self.persona_label = tk.Label(
-            top_frame, text="Persona: Default (Online)", 
-            bg="#1e1e1e", fg="#00ffcc", font=("Consolas", 12, "bold")
+            top_frame, text="SYSTEM ONLINE: JARVIS", 
+            bg=self.c_bg, fg=self.c_neon, font=("Consolas", 14, "bold"),
+            relief=tk.FLAT
         )
-        self.persona_label.pack()
+        self.persona_label.pack(side=tk.LEFT)
         
-        # Middle frame: Orb and Chat Log
-        mid_frame = tk.Frame(self.root, bg="#1e1e1e")
-        mid_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=20)
+        self.agent_label = tk.Label(
+            top_frame, text="AGENT: Standby", 
+            bg=self.c_bg, fg="#ffaa00", font=("Consolas", 14, "bold"),
+            relief=tk.FLAT
+        )
+        self.agent_label.pack(side=tk.RIGHT)
         
-        # Left: Animated Orb (AI core representation)
-        self.canvas = tk.Canvas(mid_frame, width=220, height=220, bg="#1e1e1e", highlightthickness=0)
-        self.canvas.pack(side=tk.LEFT, padx=10, pady=10)
+        # Left Panel: HUD Stats & Orb
+        left_panel = tk.Frame(self.root, bg=self.c_panel, highlightbackground=self.c_neon, highlightthickness=1)
+        left_panel.grid(row=1, column=0, sticky="ns", pady=20, padx=(20, 10), ipadx=10, ipady=10)
+        
+        # Animated Orb (AI core representation)
+        self.canvas = tk.Canvas(left_panel, width=220, height=220, bg=self.c_panel, highlightthickness=0)
+        self.canvas.pack(side=tk.TOP, pady=10)
         
         # Creating layered circles for a glowing orb effect
-        self.orb_outer = self.canvas.create_oval(30, 30, 190, 190, fill="", outline="#004488", width=4)
-        self.orb = self.canvas.create_oval(50, 50, 170, 170, fill="#0088ff", outline="#00ffff", width=2)
+        self.orb_outer = self.canvas.create_oval(30, 30, 190, 190, fill="", outline=self.c_dim, width=4, dash=(4, 4))
+        self.orb = self.canvas.create_oval(50, 50, 170, 170, fill="#0088ff", outline=self.c_neon, width=2)
         self.orb_inner = self.canvas.create_oval(90, 90, 130, 130, fill="#ccffff", outline="")
         
-        # Right: Conversation Log
-        self.chat_log = scrolledtext.ScrolledText(
-            mid_frame, bg="#252526", fg="#d4d4d4", font=("Consolas", 11), wrap=tk.WORD,
-            insertbackground="white", highlightthickness=1, highlightbackground="#333333"
+        # System Stats Frame
+        stats_frame = tk.Frame(left_panel, bg=self.c_panel)
+        stats_frame.pack(side=tk.TOP, fill=tk.X, pady=20, padx=10)
+        
+        # CPU Usage
+        tk.Label(stats_frame, text="CPU USAGE", bg=self.c_panel, fg=self.c_neon, font=("Consolas", 10, "bold")).pack(anchor="w")
+        
+        cpu_frame = tk.Frame(stats_frame, bg=self.c_bg)
+        cpu_frame.pack(fill=tk.X, pady=(2, 10))
+        self.cpu_bar = tk.Canvas(cpu_frame, height=15, bg=self.c_bg, highlightthickness=1, highlightbackground=self.c_dim)
+        self.cpu_bar.pack(fill=tk.X)
+        self.cpu_fill = self.cpu_bar.create_rectangle(0, 0, 0, 15, fill=self.c_neon, outline="")
+        self.cpu_text = self.cpu_bar.create_text(5, 8, text="0%", fill="white", anchor="w", font=("Consolas", 8))
+        
+        # RAM Usage
+        tk.Label(stats_frame, text="MEM USAGE", bg=self.c_panel, fg=self.c_neon, font=("Consolas", 10, "bold")).pack(anchor="w")
+        
+        ram_frame = tk.Frame(stats_frame, bg=self.c_bg)
+        ram_frame.pack(fill=tk.X, pady=(2, 10))
+        self.ram_bar = tk.Canvas(ram_frame, height=15, bg=self.c_bg, highlightthickness=1, highlightbackground=self.c_dim)
+        self.ram_bar.pack(fill=tk.X)
+        self.ram_fill = self.ram_bar.create_rectangle(0, 0, 0, 15, fill=self.c_neon, outline="")
+        self.ram_text = self.ram_bar.create_text(5, 8, text="0%", fill="white", anchor="w", font=("Consolas", 8))
+        
+        # Active Skills Array
+        tk.Label(stats_frame, text="ACTIVE SKILLS", bg=self.c_panel, fg=self.c_neon, font=("Consolas", 10, "bold")).pack(anchor="w", pady=(10, 2))
+        self.skills_label = tk.Label(
+            stats_frame, text="None", 
+            bg=self.c_panel, fg=self.c_text, font=("Consolas", 10), justify=tk.LEFT
         )
-        self.chat_log.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        self.skills_label.pack(anchor="w")
+        
+        # Right Panel: Chat Log & Input
+        right_panel = tk.Frame(self.root, bg=self.c_bg)
+        right_panel.grid(row=1, column=1, sticky="nsew", pady=20, padx=(10, 20))
+        
+        # Conversation Log
+        self.chat_log = scrolledtext.ScrolledText(
+            right_panel, bg=self.c_panel, fg=self.c_text, font=("Consolas", 11), wrap=tk.WORD,
+            insertbackground=self.c_neon, highlightthickness=1, highlightbackground=self.c_dim
+        )
+        self.chat_log.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         self.chat_log.config(state=tk.DISABLED)
         
         # Bottom frame: Input Box
-        bottom_frame = tk.Frame(self.root, bg="#1e1e1e")
-        bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=20, padx=20)
+        bottom_frame = tk.Frame(right_panel, bg=self.c_bg)
+        bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(15, 0))
         
         self.input_var = tk.StringVar()
         self.input_entry = tk.Entry(
-            bottom_frame, textvariable=self.input_var, bg="#3c3c3c", fg="#ffffff", 
-            font=("Consolas", 12), insertbackground="white", relief=tk.FLAT
+            bottom_frame, textvariable=self.input_var, bg=self.c_panel, fg=self.c_neon, 
+            font=("Consolas", 12, "bold"), insertbackground=self.c_neon, relief=tk.FLAT,
+            highlightthickness=1, highlightbackground=self.c_dim
         )
         self.input_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=8, padx=(0, 10))
         self.input_entry.bind("<Return>", self.on_submit)
         
         self.submit_btn = tk.Button(
-            bottom_frame, text="Send", bg="#007acc", fg="white", 
-            font=("Consolas", 11, "bold"), command=self.on_submit, relief=tk.FLAT, activebackground="#005f9e"
+            bottom_frame, text="EXECUTE", bg=self.c_dim, fg=self.c_neon, 
+            font=("Consolas", 11, "bold"), command=self.on_submit, relief=tk.FLAT, 
+            activebackground=self.c_neon, activeforeground="black"
         )
         self.submit_btn.pack(side=tk.RIGHT, ipadx=15, ipady=4)
+        
+        # HUD decorations
+        deco_frame = tk.Frame(self.root, bg=self.c_bg, height=5)
+        deco_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=20, pady=(0, 10))
+        tk.Frame(deco_frame, bg=self.c_neon, height=2, width=150).pack(side=tk.LEFT)
+        tk.Frame(deco_frame, bg=self.c_neon, height=2, width=150).pack(side=tk.RIGHT)
+
         
     def animate_orb(self):
         # Pulsing animation using sine wave
@@ -93,8 +165,57 @@ class JarvisGUI:
         
         self.root.after(40, self.animate_orb)
         
+    def update_system_stats(self):
+        """Update CPU, RAM stats and Agent active state in the HUD"""
+        try:
+            # Requires psutil
+            cpu = psutil.cpu_percent()
+            ram = psutil.virtual_memory().percent
+            
+            # Update bar filled rectangles based on % Width max ~190
+            max_w = 190 
+            
+            self.cpu_bar.coords(self.cpu_fill, 0, 0, max_w * (cpu/100.0), 15)
+            self.cpu_bar.itemconfig(self.cpu_text, text=f"{cpu}%")
+            if cpu > 80:
+                self.cpu_bar.itemconfig(self.cpu_fill, fill=self.c_warn)
+                self.cpu_bar.itemconfig(self.cpu_text, fill="black")
+            else:
+                self.cpu_bar.itemconfig(self.cpu_fill, fill=self.c_neon)
+                self.cpu_bar.itemconfig(self.cpu_text, fill="black")
+                
+            self.ram_bar.coords(self.ram_fill, 0, 0, max_w * (ram/100.0), 15)
+            self.ram_bar.itemconfig(self.ram_text, text=f"{ram}%")
+            if ram > 85:
+                self.ram_bar.itemconfig(self.ram_fill, fill=self.c_warn)
+                self.ram_bar.itemconfig(self.ram_text, fill="black")
+            else:
+                self.ram_bar.itemconfig(self.ram_fill, fill=self.c_neon)
+                self.ram_bar.itemconfig(self.ram_text, fill="black")
+                
+            # Update Active Agent Label
+            self.agent_label.config(text=f"AGENT: {self.current_agent}")
+            
+            # Update Skills Array Label
+            if not self.active_skills:
+                self.skills_label.config(text="- NULL", fg=self.c_dim)
+            else:
+                txt = "\n".join([f"> {s}" for s in set(self.active_skills)])
+                self.skills_label.config(text=txt, fg=self.c_neon)
+                
+        except Exception as e:
+            pass
+            
+        self.root.after(1500, self.update_system_stats)
+        
     def set_processing_state(self, is_processing):
         self.is_processing = is_processing
+        
+    def set_agent(self, agent_name):
+        self.current_agent = agent_name
+        
+    def set_active_skills(self, skills_list):
+        self.active_skills = skills_list
         
     def on_submit(self, event=None):
         user_text = self.input_var.get().strip()
