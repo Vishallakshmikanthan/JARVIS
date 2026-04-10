@@ -62,6 +62,10 @@ class Config:
     LOG_DIR = BASE_DIR / \"logs\"
     LOG_LEVEL = os.getenv(\"LOG_LEVEL\", \"INFO\")
 
+    # --- Local Knowledge Base ---
+    KB_DIR       = BASE_DIR / \"knowledge\"          # drop PDFs / notes here
+    KB_INDEX_DIR = BASE_DIR / \"core\" / \"kb_index\"  # persisted index files
+
     # --- GUI Settings ---
     GUI_THEME = \"dark\"
     PRIMARY_COLOR = \"#00d4ff\" if PRIMARY_PERSONA == \"JARVIS\" else \"#ff0000\"

@@ -12,6 +12,13 @@ from core.memory import (
     get_conversation_context,
 )
 
+# Knowledge Base is imported lazily inside think() to avoid circular-import
+# issues during startup — but we expose a module-level convenience function.
+def ask_local_knowledge(query: str) -> Optional[str]:
+    """Proxy to the KnowledgeBase singleton — usable from anywhere."""
+    from core.knowledge_base import knowledge_base
+    return knowledge_base.ask_local_knowledge(query)
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
@@ -71,9 +78,24 @@ class Brain:
 
     def think(self, user_input: str) -> str:
         """
-        Send *user_input* to the LLM and return the assistant's reply.
+        Routing order:
+          1. Local Knowledge Base (semantic search over indexed PDFs / notes)
+          2. Ollama LLM (with persona system prompt + conversation history)
+
         Both the user message and the response are persisted to memory.
         """
+        # --- 1. Try local knowledge base first ---
+        try:
+            from core.knowledge_base import knowledge_base
+            if kb_answer := knowledge_base.ask_local_knowledge(user_input):
+                logger.info("Brain: answered from local knowledge base.")
+                log_interaction("user",      user_input, persona=persona_manager.name)
+                log_interaction("assistant", kb_answer,  persona=persona_manager.name)
+                return kb_answer
+        except Exception as e:
+            logger.warning(f"Brain: KB lookup failed, falling through to LLM: {e}")
+
+        # --- 2. Fall through to LLM ---
         messages = self._build_messages(user_input)
 
         try:
