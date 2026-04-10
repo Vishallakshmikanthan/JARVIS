@@ -110,6 +110,32 @@ def _init_all(text_mode: bool) -> dict:
         wake_listener = WakeWordListener()
         _print("INIT", "Wake-word listener ready.", _C.GREEN)
 
+    # Multi-agent orchestrator
+    from core.agents import AgentOrchestrator
+    import importlib as _il
+    orchestrator = AgentOrchestrator()
+    # Register live skill handlers for each supported intent
+    _SKILL_HANDLERS = {
+        "weather":    ("skills.weather",  "get_weather"),
+        "news":       ("skills.news",     "get_news"),
+        "search":     ("skills.search",   "web_search"),
+        "wiki":       ("skills.wiki",     "wiki_search"),
+        "music":      ("skills.spotify",  "play_music"),
+        "system":     ("skills.system",   "system_command"),
+        "joke":       ("skills.jokes",    "tell_joke"),
+        "automation": ("skills.automation", "run_automation"),
+        "file":       ("skills.file_system", "handle_file"),
+    }
+    for _intent, (_mod, _fn) in _SKILL_HANDLERS.items():
+        try:
+            _module = _il.import_module(_mod)
+            _handler = getattr(_module, _fn)
+            orchestrator.register_skill(_intent, _handler)
+        except Exception as _exc:
+            from loguru import logger
+            logger.warning(f"[main] could not register skill intent={_intent!r}: {_exc}")
+    _print("INIT", "Multi-agent orchestrator ready.", _C.GREEN)
+
     return {
         "persona_manager": persona_manager,
         "brain":           brain,
@@ -117,6 +143,7 @@ def _init_all(text_mode: bool) -> dict:
         "tts":             tts,
         "stt":             stt,
         "wake_listener":   wake_listener,
+        "orchestrator":    orchestrator,
     }
 
 
@@ -144,16 +171,27 @@ def _authenticate() -> bool:
 # Single-turn processing
 # ---------------------------------------------------------------------------
 
-def _process(user_text: str, ctx: dict) -> str:
-    """Route input -> skill/LLM -> log to memory -> return response string."""
+def _process(user_text: str, ctx: dict, agent_mode: bool = False) -> str:
+    """
+    Route input -> skill/LLM -> log to memory -> return response string.
+    When agent_mode=True, the full Planner->Executor->Critic pipeline is used.
+    """
     from core.memory import log_interaction
 
     log_interaction("user", user_text, persona=ctx["persona_manager"].name)
 
-    route = ctx["router"].route(user_text)
-    _print("ROUTE", str(route), _C.DIM)
-
-    response = _dispatch(route)
+    if agent_mode:
+        from loguru import logger
+        result = ctx["orchestrator"].run(user_text)
+        logger.info(
+            f"[main:_process] agent pipeline steps={len(result.steps)} "
+            f"critic_passed={result.critic_passed}"
+        )
+        response = result.final_response
+    else:
+        route = ctx["router"].route(user_text)
+        _print("ROUTE", str(route), _C.DIM)
+        response = _dispatch(route)
 
     log_interaction("assistant", response, persona=ctx["persona_manager"].name)
     return response
@@ -210,7 +248,8 @@ def _voice_loop(ctx: dict) -> None:
             _print("YOU", user_text, _C.GREEN)
 
             # Route + respond
-            response = _process(user_text, ctx)
+            agent_mode: bool = ctx.get("agent_mode", False)
+            response = _process(user_text, ctx, agent_mode=agent_mode)
             _print(ctx["persona_manager"].name, response, _C.CYAN)
             ctx["tts"].speak(response)
 
@@ -244,7 +283,8 @@ def _text_loop(ctx: dict) -> None:
             ctx["tts"].speak(farewell)
             break
 
-        response = _process(user_text, ctx)
+        agent_mode: bool = ctx.get("agent_mode", False)
+        response = _process(user_text, ctx, agent_mode=agent_mode)
         _print(ctx["persona_manager"].name, response, _C.CYAN)
         ctx["tts"].speak(response)
 
@@ -261,6 +301,10 @@ def main() -> None:
         "--text", action="store_true",
         help="Run in text-input mode instead of voice mode."
     )
+    parser.add_argument(
+        "--agents", action="store_true",
+        help="Use the multi-agent pipeline (Planner→Executor→Critic) for all requests."
+    )
     args = parser.parse_args()
 
     from config import config
@@ -268,6 +312,9 @@ def main() -> None:
     _banner(config.APP_NAME, config.VERSION, config.ASSISTANT_NAME)
 
     ctx = _init_all(text_mode=args.text)
+    ctx["agent_mode"] = args.agents
+    if args.agents:
+        _print("MODE", "Multi-agent pipeline enabled (Planner → Executor → Critic).", _C.MAGENTA)
 
     # Startup greeting
     greeting = ctx["persona_manager"].greeting()
