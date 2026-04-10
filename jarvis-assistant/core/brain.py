@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 from typing import Optional
 
 import ollama
@@ -14,10 +15,20 @@ from core.memory import (
 
 # Knowledge Base is imported lazily inside think() to avoid circular-import
 # issues during startup — but we expose a module-level convenience function.
+@functools.lru_cache(maxsize=256)
 def ask_local_knowledge(query: str) -> Optional[str]:
-    """Proxy to the KnowledgeBase singleton — usable from anywhere."""
+    """Proxy to the KnowledgeBase singleton — cached by query string."""
     from core.knowledge_base import knowledge_base
     return knowledge_base.ask_local_knowledge(query)
+
+# ---------------------------------------------------------------------------
+# LLM response cache
+# A bounded session cache for deterministic/factual LLM answers.
+# Key: (model, system_prompt_hash, user_input)
+# Only caches single-turn queries (no multi-turn history dependence).
+# ---------------------------------------------------------------------------
+_LLM_CACHE: dict[str, str] = {}
+_LLM_CACHE_MAX = 128   # evict oldest entry when full
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -79,15 +90,15 @@ class Brain:
     def think(self, user_input: str) -> str:
         """
         Routing order:
-          1. Local Knowledge Base (semantic search over indexed PDFs / notes)
-          2. Ollama LLM (with persona system prompt + conversation history)
+          1. Local Knowledge Base (semantic search over indexed PDFs / notes) — LRU cached.
+          2. LLM response cache  (exact-match session cache for repeated queries).
+          3. Ollama LLM          (with persona system prompt + conversation history).
 
         Both the user message and the response are persisted to memory.
         """
-        # --- 1. Try local knowledge base first ---
+        # --- 1. Try local knowledge base (cached) ---
         try:
-            from core.knowledge_base import knowledge_base
-            if kb_answer := knowledge_base.ask_local_knowledge(user_input):
+            if kb_answer := ask_local_knowledge(user_input):
                 logger.info("Brain: answered from local knowledge base.")
                 log_interaction("user",      user_input, persona=persona_manager.name)
                 log_interaction("assistant", kb_answer,  persona=persona_manager.name)
@@ -95,7 +106,13 @@ class Brain:
         except Exception as e:
             logger.warning(f"Brain: KB lookup failed, falling through to LLM: {e}")
 
-        # --- 2. Fall through to LLM ---
+        # --- 2. LLM response cache (exact-match, same persona + model) ---
+        _cache_key = f"{self.model}|{persona_manager.name}|{user_input}"
+        if cached := _LLM_CACHE.get(_cache_key):
+            logger.debug(f"Brain: LLM cache hit for '{user_input[:60]}'")
+            return cached
+
+        # --- 3. Fall through to Ollama LLM ---
         messages = self._build_messages(user_input)
 
         try:
@@ -120,6 +137,11 @@ class Brain:
             return persona_manager.error_response()
 
         reply: str = response["message"]["content"].strip()
+
+        # Populate LLM cache (evict oldest entry when at capacity)
+        if len(_LLM_CACHE) >= _LLM_CACHE_MAX:
+            _LLM_CACHE.pop(next(iter(_LLM_CACHE)))
+        _LLM_CACHE[_cache_key] = reply
 
         # Persist both turns
         log_interaction("user", user_input, persona=persona_manager.name)

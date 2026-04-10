@@ -249,6 +249,9 @@ def _process(user_text: str, ctx: dict, agent_mode: bool = False) -> str:
 
     log_interaction("user", user_text, persona=ctx["persona_manager"].name)
 
+    import time as _time
+    _t0 = _time.perf_counter()
+
     if agent_mode:
         from loguru import logger
         from core.planner import plan_task
@@ -263,6 +266,9 @@ def _process(user_text: str, ctx: dict, agent_mode: bool = False) -> str:
         route = ctx["router"].route(user_text)
         _print("ROUTE", str(route), _C.DIM)
         response = _dispatch(route)
+
+    _elapsed = _time.perf_counter() - _t0
+    _print("PERF", f"Response in {_elapsed:.3f}s", _C.DIM)
 
     log_interaction("assistant", response, persona=ctx["persona_manager"].name)
 

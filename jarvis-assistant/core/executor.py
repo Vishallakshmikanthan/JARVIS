@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import functools
 import importlib
 import time
 from dataclasses import dataclass, field
@@ -18,6 +21,17 @@ from core.recovery import recover as _recovery_recover
 
 DEFAULT_MAX_RETRIES: int = 2          # attempts before falling back to LLM
 RETRY_DELAY_SECONDS: float = 0.4     # wait between retry attempts
+
+# Intents whose outputs are safe to cache within the session.
+# Time-sensitive skills (weather, news) are intentionally excluded.
+_CACHEABLE_INTENTS: frozenset[str] = frozenset({
+    "joke", "wiki", "search",
+})
+
+# Thread pool reused across all async plan executions.
+_THREAD_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=8, thread_name_prefix="jarvis-skill"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -122,14 +136,18 @@ def execute_plan(
     """
     Execute an ordered list of PlanStep objects and return a combined response.
 
+    Single-step plans run synchronously (zero overhead).
+    Multi-step plans fan all steps out to the thread pool and run them in
+    parallel — the LLM combiner already handles final synthesis, so cross-step
+    context dependencies are resolved there. Wall-clock time for multi-step
+    plans is therefore bounded by the *slowest* single step rather than the
+    sum of all steps.
+
     For each step the execution order is:
         1. Skill dispatch  — dynamically import the skill module and call its handler.
         2. Retry           — on failure, retry up to *max_retries* times with back-off.
         3. LLM fallback    — if all skill attempts fail, ask the LLM brain directly.
         4. Hard failure    — if LLM also fails, emit a safe user-facing error message.
-
-    Results from earlier steps are passed as context to later steps so the LLM
-    fallback can reference prior outputs (e.g. "given the weather above, book a cab").
 
     Args:
         steps:       Ordered list of PlanStep objects from core.planner.plan_task().
@@ -139,42 +157,75 @@ def execute_plan(
 
     Returns:
         A single combined response string. Always non-empty.
-
-    Example:
-        >>> from core.planner import plan_task
-        >>> steps = plan_task("Check the weather and tell me a joke")
-        >>> response = execute_plan(steps)
-        >>> print(response)
-        "The weather in London is 18°C and partly cloudy. ... Here's a joke: ..."
     """
     if not steps:
         logger.warning("[executor:execute_plan] received empty step list")
         return "I have no steps to execute. Please try rephrasing your request."
 
+    _t0 = time.perf_counter()
     logger.info(f"[executor:execute_plan] executing {len(steps)} step(s)")
 
-    results: list[StepResult] = []
-    accumulated_context = context or ""
-
-    for step in steps:
+    if len(steps) == 1:
+        # Fast path — skip all async overhead for the common single-step case.
         result = _execute_step(
-            step=step,
+            step=steps[0],
             max_retries=max_retries,
-            prior_context=accumulated_context,
+            prior_context=context or "",
         )
-        results.append(result)
-
-        # Build rolling context for subsequent steps
-        accumulated_context += f"\nStep {step.index} ({step.description}): {result.output}"
-
-        logger.info(f"[executor:execute_plan] {result}")
+        results: list[StepResult] = [result]
+    else:
+        # Parallel path — fan all steps out concurrently.
+        results = _execute_parallel(steps, max_retries, context or "")
 
     combined = _combine_results(results)
+    elapsed = time.perf_counter() - _t0
 
     summary = ExecutionSummary(steps=steps, results=results, combined_response=combined)
-    logger.info(f"[executor:execute_plan] complete {summary}")
+    logger.info(
+        f"[executor:execute_plan] complete {summary} "
+        f"elapsed={elapsed:.3f}s parallel={'yes' if len(steps) > 1 else 'no'}"
+    )
 
     return combined
+
+
+def _execute_parallel(
+    steps: list[PlanStep],
+    max_retries: int,
+    base_context: str,
+) -> list[StepResult]:
+    """
+    Run all *steps* concurrently using the module-level ThreadPoolExecutor.
+    Returns results ordered by step.index so _combine_results stays deterministic.
+    """
+    futures: dict[concurrent.futures.Future, int] = {}
+
+    for step in steps:
+        future = _THREAD_POOL.submit(
+            _execute_step,
+            step=step,
+            max_retries=max_retries,
+            prior_context=base_context,   # each step gets the same baseline context
+        )
+        futures[future] = step.index
+
+    # Collect and sort by original step order
+    indexed_results: list[tuple[int, StepResult]] = []
+    for future in concurrent.futures.as_completed(futures):
+        idx = futures[future]
+        try:
+            indexed_results.append((idx, future.result()))
+        except Exception as exc:
+            # Manufacture a failure result so the plan never silently loses a step
+            failed_step = steps[idx - 1]
+            indexed_results.append((idx, _hard_failure(failed_step, 1, str(exc))))
+            logger.error(f"[executor:_execute_parallel] step={idx} raised: {exc}")
+
+    indexed_results.sort(key=lambda t: t[0])
+    results = [r for _, r in indexed_results]
+    for r in results:
+        logger.info(f"[executor:_execute_parallel] {r}")
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -218,9 +269,16 @@ def _execute_step(
     module_path, function_name = dispatch
     last_error: Optional[str] = None
 
+    # Route through the LRU cache for safe-to-cache intents.
+    invoke_skill = (
+        _cached_skill_call
+        if step.intent in _CACHEABLE_INTENTS
+        else _call_skill
+    )
+
     for attempt in range(1, max_retries + 2):      # +2: 1 initial + max_retries
         try:
-            output = _call_skill(module_path, function_name, step.query)
+            output = invoke_skill(module_path, function_name, step.query)
             logger.info(
                 f"[executor:_execute_step] skill OK intent={step.intent!r} "
                 f"attempt={attempt}"
@@ -269,6 +327,15 @@ def _execute_step(
 # ---------------------------------------------------------------------------
 # Skill dispatch
 # ---------------------------------------------------------------------------
+
+@functools.lru_cache(maxsize=512)
+def _cached_skill_call(module_path: str, function_name: str, query: str) -> str:
+    """
+    LRU-cached wrapper around the raw skill dispatcher.
+    Only called for intents listed in *_CACHEABLE_INTENTS*.
+    """
+    return _call_skill(module_path, function_name, query)
+
 
 def _call_skill(module_path: str, function_name: str, query: str) -> str:
     """
