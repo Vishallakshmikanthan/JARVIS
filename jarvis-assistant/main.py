@@ -110,6 +110,11 @@ def _init_all(text_mode: bool) -> dict:
         wake_listener = WakeWordListener()
         _print("INIT", "Wake-word listener ready.", _C.GREEN)
 
+    # Autonomous mode agent
+    from core.autonomous import AutonomousAgent
+    autonomous_agent = AutonomousAgent(speak_fn=tts.speak)
+    _print("INIT", "Autonomous agent ready.", _C.GREEN)
+
     # Multi-agent orchestrator
     from core.agents import AgentOrchestrator
     import importlib as _il
@@ -137,13 +142,14 @@ def _init_all(text_mode: bool) -> dict:
     _print("INIT", "Multi-agent orchestrator ready.", _C.GREEN)
 
     return {
-        "persona_manager": persona_manager,
-        "brain":           brain,
-        "router":          router,
-        "tts":             tts,
-        "stt":             stt,
-        "wake_listener":   wake_listener,
-        "orchestrator":    orchestrator,
+        "persona_manager":  persona_manager,
+        "brain":            brain,
+        "router":           router,
+        "tts":              tts,
+        "stt":              stt,
+        "wake_listener":    wake_listener,
+        "orchestrator":     orchestrator,
+        "autonomous_agent": autonomous_agent,
     }
 
 
@@ -177,6 +183,23 @@ def _process(user_text: str, ctx: dict, agent_mode: bool = False) -> str:
     When agent_mode=True, the full Planner->Executor->Critic pipeline is used.
     """
     from core.memory import log_interaction
+    from core.autonomous import detect_autonomous_command
+
+    # --- Autonomous mode control (intercept before normal routing) ---
+    auto_cmd = detect_autonomous_command(user_text)
+    if auto_cmd is not None:
+        agent: object = ctx.get("autonomous_agent")
+        if agent is None:
+            response = "Autonomous agent is not available."
+        elif auto_cmd == "start":
+            response = agent.start()
+        elif auto_cmd == "stop":
+            response = agent.stop()
+        else:
+            response = agent.status()
+        log_interaction("user",      user_text, persona=ctx["persona_manager"].name)
+        log_interaction("assistant", response,  persona=ctx["persona_manager"].name)
+        return response
 
     log_interaction("user", user_text, persona=ctx["persona_manager"].name)
 
@@ -307,6 +330,10 @@ def main() -> None:
         "--agents", action="store_true",
         help="Use the multi-agent pipeline (Planner→Executor→Critic) for all requests."
     )
+    parser.add_argument(
+        "--autonomous", action="store_true",
+        help="Start in autonomous mode (background system monitoring + proactive alerts)."
+    )
     args = parser.parse_args()
 
     from config import config
@@ -317,6 +344,11 @@ def main() -> None:
     ctx["agent_mode"] = args.agents
     if args.agents:
         _print("MODE", "Multi-agent pipeline enabled (Planner → Executor → Critic).", _C.MAGENTA)
+
+    if args.autonomous:
+        msg = ctx["autonomous_agent"].start()
+        _print("MODE", msg, _C.MAGENTA)
+        ctx["tts"].speak(msg)
 
     # Startup greeting
     greeting = ctx["persona_manager"].greeting()
