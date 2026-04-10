@@ -185,6 +185,42 @@ def _process(user_text: str, ctx: dict, agent_mode: bool = False) -> str:
     from core.memory import log_interaction
     from core.autonomous import detect_autonomous_command
     from core.skill_generator import detect_skill_creation_command, create_skill
+    from core.safety import (
+        check as safety_check,
+        handle_confirmation_reply,
+        is_awaiting_confirmation,
+    )
+
+    # --- Safety gate (first intercept — runs before everything else) ---
+    persona_name = ctx["persona_manager"].name
+
+    def _safety_reply(message: str) -> str:
+        log_interaction("user",      user_text, persona=persona_name)
+        log_interaction("assistant", message,   persona=persona_name)
+        return message
+
+    # If JARVIS is waiting for a yes/no on a previous command, handle it now.
+    if is_awaiting_confirmation():
+        approved, original_cmd = handle_confirmation_reply(user_text)
+        if approved and original_cmd is not None:
+            _print("SAFETY", "Confirmed — executing original command.", _C.YELLOW)
+            # Re-enter _process with the approved command, bypassing safety this time.
+            return _process(original_cmd, ctx, agent_mode=agent_mode)
+        reply = (
+            "No pending action found."
+            if approved
+            else "Understood, Sir. Action cancelled."
+        )
+        return _safety_reply(reply)
+
+    safety = safety_check(user_text)
+    if safety.is_blocked:
+        _print("SAFETY", f"BLOCKED — {safety.reason}", _C.RED)
+        return _safety_reply(safety.prompt)
+
+    if safety.needs_confirmation:
+        _print("SAFETY", f"CONFIRM REQUIRED — {safety.reason}", _C.YELLOW)
+        return _safety_reply(safety.prompt)
 
     # --- Skill generator (intercept before normal routing) ---
     skill_purpose = detect_skill_creation_command(user_text)
