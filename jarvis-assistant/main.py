@@ -219,6 +219,16 @@ def _process(user_text: str, ctx: dict, agent_mode: bool = False) -> str:
         response = _dispatch(route)
 
     log_interaction("assistant", response, persona=ctx["persona_manager"].name)
+
+    # Asynchronously learn from the completed interaction (non-blocking)
+    import threading as _threading
+    from core.memory import learn_from_interaction as _learn
+    _threading.Thread(
+        target=_learn,
+        args=(user_text, response, ctx["persona_manager"].name),
+        daemon=True,
+    ).start()
+
     return response
 
 
