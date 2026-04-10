@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import json
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -236,6 +237,62 @@ def semantic_search(query: str, top_k: int = 5) -> list[dict]:
 
     logger.debug(f"semantic_search('{query}') → {len(results)} results (top score: {results[0]['score'] if results else 0})")
     return results
+
+
+# ---------------------------------------------------------------------------
+# Session context  (in-memory, not persisted — reset on each process start)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SessionContext:
+    """Tracks intent and entity continuity across conversation turns.
+
+    Used by the router to resolve follow-up questions like
+    "What about tomorrow?" when the previous intent was 'weather'.
+    """
+
+    last_intent: str = "general"
+    last_entities: str = ""      # stripped query from the previous turn
+    last_raw_input: str = ""
+    turn_count: int = 0
+    _history: list[dict] = field(default_factory=list, repr=False)
+
+    def update(self, intent: str, entities: str, raw_input: str) -> None:
+        """Record the result of a completed turn."""
+        self._history.append({
+            "intent": self.last_intent,
+            "entities": self.last_entities,
+            "raw": self.last_raw_input,
+        })
+        self.last_intent = intent
+        self.last_entities = entities
+        self.last_raw_input = raw_input
+        self.turn_count += 1
+        logger.debug(
+            f"SessionContext updated | turn={self.turn_count} "
+            f"intent={intent} entities='{entities[:40]}'"
+        )
+
+    def has_context(self) -> bool:
+        """True when there is a non-trivial previous intent to inherit."""
+        return self.last_intent != "general" and bool(self.last_entities)
+
+    def clear(self) -> None:
+        """Reset all session state (e.g. when the user starts a new topic)."""
+        self.last_intent = "general"
+        self.last_entities = ""
+        self.last_raw_input = ""
+        self.turn_count = 0
+        self._history.clear()
+        logger.info("SessionContext cleared")
+
+    def recent_history(self, n: int = 3) -> list[dict]:
+        """Return the last *n* recorded turns (oldest first)."""
+        return self._history[-n:]
+
+
+# Module-level singleton imported by router.py and other modules
+session_ctx = SessionContext()
 
 
 # ---------------------------------------------------------------------------

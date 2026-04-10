@@ -14,6 +14,8 @@ from typing import Optional
 
 from loguru import logger
 
+from core.memory import session_ctx
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -124,11 +126,12 @@ def get_history(limit: int = _MAX_TURNS) -> list[Turn]:
 
 
 def clear_context() -> None:
-    """Reset the conversation history and all counters."""
+    """Reset the conversation history, all counters, and the router session context."""
     _history.clear()
     _session_intent_counts.clear()
     global _last_intent
     _last_intent = None
+    session_ctx.clear()   # keep router context in sync
     logger.info("Conversation context cleared.")
 
 
@@ -171,10 +174,12 @@ def track_context(user_input: str) -> str:
     if re.search(r"\b(topic|dominant|main|focus|what\s+are\s+we)\b", text):
         dominant = get_dominant_intent()
         last     = get_last_intent()
+        ctx_entities = session_ctx.last_entities
         return (
             f"Most recent intent: {last or 'unknown'}. "
-            f"Dominant topic (last 5 turns): {dominant or 'none'}."
-        )
+            f"Dominant topic (last 5 turns): {dominant or 'none'}. "
+            + (f"Active entities: '{ctx_entities}'." if ctx_entities else "")
+        ).strip()
 
     # Default — show context summary
     summary = get_context_summary()

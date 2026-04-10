@@ -8,6 +8,7 @@ import ollama
 from loguru import logger
 
 from config import config
+from core.memory import session_ctx
 from core.persona import persona_manager
 
 # ---------------------------------------------------------------------------
@@ -99,6 +100,33 @@ def _keyword_classify(text: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Follow-up / context-continuation detection
+# ---------------------------------------------------------------------------
+
+# Phrases that strongly signal a follow-up to the previous turn
+_FOLLOWUP_PATTERN = re.compile(
+    r"^(what|how)\s+about\b"       # "what about tomorrow?", "how about Paris?"
+    r"|^and\s+\w"                   # "and in London?"
+    r"|^also\b"                     # "also next week"
+    r"|^(what|how)\s+if\b"         # "what if it rains?"
+    r"|^(it|that|this|there|those|they)\b",  # pronoun-led short queries
+    re.I,
+)
+
+# Max token count for a query that has no strong intent keyword to still be
+# treated as a follow-up (e.g. "tomorrow?", "in Berlin?")
+_FOLLOWUP_MAX_TOKENS = 6
+
+
+def _is_followup(text: str) -> bool:
+    """Return True when *text* looks like a context-dependent follow-up."""
+    if _FOLLOWUP_PATTERN.match(text):
+        return True
+    # Short input with zero strong-intent keywords → probably a follow-up
+    return len(text.split()) <= _FOLLOWUP_MAX_TOKENS and _keyword_classify(text) is None
+
+
+# ---------------------------------------------------------------------------
 # LLM-based intent classification
 # ---------------------------------------------------------------------------
 
@@ -185,9 +213,28 @@ class Router:
         text = user_input.strip()
         intent: Optional[str] = None
         confidence = "keyword"
+        query_text = text  # may be enriched below
+
+        # --- 0. Context-aware follow-up resolution ---
+        if session_ctx.has_context() and _is_followup(text):
+            intent = session_ctx.last_intent
+            confidence = "context"
+            # Enrich the query: prepend known entities from the previous turn
+            # e.g. last_entities="London", text="what about tomorrow?" → "London tomorrow"
+            stripped_followup = re.sub(
+                r"^(what|how)\s+about\s*|^and\s+|^also\s+|^(it|that|this|there|those|they)\s*",
+                "",
+                text,
+                flags=re.I,
+            ).strip()
+            query_text = f"{session_ctx.last_entities} {stripped_followup}".strip()
+            logger.debug(
+                f"Context follow-up | inherited='{intent}' "
+                f"enriched='{query_text[:60]}'"
+            )
 
         # --- 1. Try LLM classification ---
-        if self.use_llm:
+        if intent is None and self.use_llm:
             intent = _llm_classify(text)
             if intent:
                 confidence = "llm"
@@ -204,11 +251,11 @@ class Router:
 
         # --- Build the parsed input ---
         if intent == "persona":
-            parsed = _extract_persona_target(text)
+            parsed = _extract_persona_target(query_text)
         elif intent == "general":
-            parsed = text
+            parsed = query_text
         else:
-            parsed = _strip_trigger_words(text, intent)
+            parsed = _strip_trigger_words(query_text, intent)
 
         module, function = _INTENT_MAP[intent]
 
@@ -220,23 +267,44 @@ class Router:
             confidence=confidence,
         )
         logger.info(f"Router → {route}")
+
+        # --- Update session context for the next turn ---
+        session_ctx.update(intent, parsed, text)
+
         return route
 
     def route_keyword_only(self, user_input: str) -> Route:
         """Force keyword-only routing (skips LLM classification)."""
         text = user_input.strip()
-        intent = _keyword_classify(text) or "general"
+        query_text = text
+
+        # Honour context for follow-up queries even in keyword-only mode
+        if session_ctx.has_context() and _is_followup(text):
+            intent = session_ctx.last_intent
+            confidence = "context"
+            stripped_followup = re.sub(
+                r"^(what|how)\s+about\s*|^and\s+|^also\s+|^(it|that|this|there|those|they)\s*",
+                "",
+                text,
+                flags=re.I,
+            ).strip()
+            query_text = f"{session_ctx.last_entities} {stripped_followup}".strip()
+        else:
+            intent = _keyword_classify(text) or "general"
+            confidence = "keyword"
 
         if intent == "persona":
-            parsed = _extract_persona_target(text)
+            parsed = _extract_persona_target(query_text)
         elif intent == "general":
-            parsed = text
+            parsed = query_text
         else:
-            parsed = _strip_trigger_words(text, intent)
+            parsed = _strip_trigger_words(query_text, intent)
 
         module, function = _INTENT_MAP[intent]
-        return Route(intent=intent, module=module, function=function,
-                     parsed_input=parsed, confidence="keyword")
+        route = Route(intent=intent, module=module, function=function,
+                      parsed_input=parsed, confidence=confidence)
+        session_ctx.update(intent, parsed, text)
+        return route
 
 
 # ---------------------------------------------------------------------------
