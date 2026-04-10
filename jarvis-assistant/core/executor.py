@@ -10,6 +10,7 @@ from loguru import logger
 
 from config import config
 from core.planner import PlanStep, SKILL_INTENTS
+from core.recovery import recover as _recovery_recover
 
 # ---------------------------------------------------------------------------
 # Retry configuration
@@ -240,16 +241,28 @@ def _execute_step(
             if attempt <= max_retries:
                 time.sleep(RETRY_DELAY_SECONDS * attempt)   # progressive back-off
 
-    # All skill attempts exhausted — try LLM
+    # All skill attempts exhausted — invoke recovery pipeline
     logger.warning(
         f"[executor:_execute_step] all {max_retries + 1} attempt(s) failed for "
-        f"intent={step.intent!r} — falling back to LLM"
+        f"intent={step.intent!r} — invoking recovery pipeline"
     )
-    return _llm_fallback(
-        step=step,
+
+    # Build a real Exception from the last error string so recovery can classify it
+    skill_exc = RuntimeError(last_error or "unknown skill error")
+    recovery = _recovery_recover(
+        intent=step.intent,
+        query=step.query,
+        original_error=skill_exc,
         prior_context=prior_context,
+    )
+
+    return StepResult(
+        step=step,
+        output=recovery.output,
+        success=recovery.recovered,
         attempts=max_retries + 2,
-        skill_error=last_error,
+        used_fallback=True,
+        error=None if recovery.recovered else last_error,
     )
 
 
